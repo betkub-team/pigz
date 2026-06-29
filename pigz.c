@@ -208,7 +208,7 @@
    2.8    19 Aug 2023  Fix version bug when compiling with zlib 1.3
                        Save a modification time only for regular files
                        Write all available uncompressed data on an error
-   2.9    29 Jun 2026  Add --progress live meter on stderr (compress/decompress)
+   2.9    29 Jun 2026  Add --progress live meter on stderr (compress/decompress/test)
                        Windows: detect program name and strip .exe for unpigz
                        Build static Windows .exe linked against zlib-ng
  */
@@ -630,7 +630,8 @@ local int grumble(char *fmt, ...) {
 
 // Print a one-line progress meter to stderr, updated in place with '\r' and
 // throttled to about four times per second. Driven from readn(), so it covers
-// both compression and decompression -- progress is measured as input bytes
+// compression, decompression, and integrity testing (-t) -- progress is
+// measured as input bytes
 // consumed over the total input size (the uncompressed file when compressing,
 // the .gz file when decompressing). When the total is unknown (stdin/pipe) it
 // shows bytes processed and throughput only. Everything goes to stderr so the
@@ -651,14 +652,16 @@ local void show_progress(int final) {
     double rate = dt > 0 ? (double)(g.in_seen - last_seen) / dt : 0;
     if (rate < 0)                       // reset between files (in_seen rewound)
         rate = 0;
+    char *act = g.decode == 2 ? "testing" :
+                g.decode ? "decompressing" : "compressing";
     if (g.in_size)
         fprintf(stderr, "\r%s: %s %5.1f%%  %.2f / %.2f GB  %6.0f MB/s   ",
-                g.prog, g.decode ? "decompressing" : "compressing",
+                g.prog, act,
                 100.0 * (double)g.in_seen / (double)g.in_size,
                 (double)g.in_seen / 1e9, (double)g.in_size / 1e9, rate / 1e6);
     else
         fprintf(stderr, "\r%s: %s %.2f GB  %6.0f MB/s   ",
-                g.prog, g.decode ? "decompressing" : "compressing",
+                g.prog, act,
                 (double)g.in_seen / 1e9, rate / 1e6);
     fflush(stderr);
     last = now;
@@ -4142,6 +4145,11 @@ local void process(char *path) {
                 complain("skipping: %s", err.why);
                 drop(err);
                 outb(NULL, NULL, 0);
+            }
+            if (g.progress) {           // close out the --progress meter for -t
+                show_progress(1);
+                putc('\n', stderr);
+                fflush(stderr);
             }
             load_end();
             return;
