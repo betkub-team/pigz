@@ -1,6 +1,6 @@
 /* pigz.c -- parallel implementation of gzip
  * Copyright (C) 2007-2023 Mark Adler
- * Version 2.8  19 Aug 2023  Mark Adler
+ * Version 2.9  29 Jun 2026  Mr. Pong
  */
 
 /*
@@ -208,9 +208,12 @@
    2.8    19 Aug 2023  Fix version bug when compiling with zlib 1.3
                        Save a modification time only for regular files
                        Write all available uncompressed data on an error
+   2.9    29 Jun 2026  Add --progress live meter on stderr (compress/decompress)
+                       Windows: detect program name and strip .exe for unpigz
+                       Build static Windows .exe linked against zlib-ng
  */
 
-#define VERSION "pigz 2.8"
+#define VERSION "pigz 2.9"
 
 /* To-do:
     - make source portable for Windows, VMS, etc. (see gzip source code)
@@ -582,6 +585,11 @@ local struct {
     length_t out_tot;       // total bytes written to output
     unsigned long out_check;    // check value of output
 
+    // globals for the --progress meter (see show_progress())
+    length_t in_size;       // total input bytes for progress (0 if unknown)
+    length_t in_seen;       // input bytes read so far via readn()
+    int progress;           // true to print a progress meter on stderr
+
 #ifndef NOTHREAD
     // globals for decompression parallel reading
     unsigned char in_buf2[EXT]; // second buffer for parallel reads
@@ -618,6 +626,43 @@ local int grumble(char *fmt, ...) {
     message(fmt, ap);
     va_end(ap);
     return 0;
+}
+
+// Print a one-line progress meter to stderr, updated in place with '\r' and
+// throttled to about four times per second. Driven from readn(), so it covers
+// both compression and decompression -- progress is measured as input bytes
+// consumed over the total input size (the uncompressed file when compressing,
+// the .gz file when decompressing). When the total is unknown (stdin/pipe) it
+// shows bytes processed and throughput only. Everything goes to stderr so the
+// stdout data stream stays intact for "-c" pipelines. Pass final != 0 to force
+// a print (used once per file at completion). All progress accounting happens
+// on the single reader thread, so no lock is needed.
+local void show_progress(int final) {
+    static struct timeval last = {0, 0};
+    static length_t last_seen = 0;
+    if (!g.progress)
+        return;
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    double dt = (now.tv_sec - last.tv_sec) +
+                (now.tv_usec - last.tv_usec) / 1e6;
+    if (!final && dt < 0.25)
+        return;
+    double rate = dt > 0 ? (double)(g.in_seen - last_seen) / dt : 0;
+    if (rate < 0)                       // reset between files (in_seen rewound)
+        rate = 0;
+    if (g.in_size)
+        fprintf(stderr, "\r%s: %s %5.1f%%  %.2f / %.2f GB  %6.0f MB/s   ",
+                g.prog, g.decode ? "decompressing" : "compressing",
+                100.0 * (double)g.in_seen / (double)g.in_size,
+                (double)g.in_seen / 1e9, (double)g.in_size / 1e9, rate / 1e6);
+    else
+        fprintf(stderr, "\r%s: %s %.2f GB  %6.0f MB/s   ",
+                g.prog, g.decode ? "decompressing" : "compressing",
+                (double)g.in_seen / 1e9, rate / 1e6);
+    fflush(stderr);
+    last = now;
+    last_seen = g.in_seen;
 }
 
 #ifdef PIGZ_DEBUG
@@ -1010,6 +1055,10 @@ local size_t readn(int desc, unsigned char *buf, size_t len) {
         buf += ret;
         len -= (size_t)ret;
         got += (size_t)ret;
+    }
+    if (g.progress && desc == g.ind) {  // count only the main input stream
+        g.in_seen += got;
+        show_progress(0);
     }
     return got;
 }
@@ -3928,6 +3977,8 @@ local void process(char *path) {
         g.mtime = (g.headis & 2) && fstat(g.ind, &st) == 0 &&
                   S_ISREG(st.st_mode) ? st.st_mtime : 0;
         len = 0;
+        g.in_size = 0;          // stdin size unknown
+        g.in_seen = 0;
     }
     else {
         // set input file name (already set if recursed here)
@@ -4036,6 +4087,12 @@ local void process(char *path) {
         g.ind = open(g.inf, O_RDONLY, 0);
         if (g.ind < 0)
             throw(errno, "read error on %s (%s)", g.inf, strerror(errno));
+
+        // total input size for the --progress meter (st still holds the
+        // earlier lstat result: the uncompressed file when compressing, the
+        // .gz file when decompressing)
+        g.in_size = S_ISREG(st.st_mode) ? (length_t)st.st_size : 0;
+        g.in_seen = 0;
 
         // prepare gzip header information for compression
         g.name = g.headis & 1 ? justname(g.inf) : NULL;
@@ -4202,6 +4259,11 @@ local void process(char *path) {
         putc('\n', stderr);
         fflush(stderr);
     }
+    if (g.progress) {
+        show_progress(1);
+        putc('\n', stderr);
+        fflush(stderr);
+    }
 
     // finish up, copy attributes, set times, delete original
     load_end();
@@ -4274,6 +4336,7 @@ local char *helptext[] = {
 "  -p, --processes n    Allow up to n compression threads (default is the",
 "                       number of online processors, or 8 if unknown)",
 #endif
+"  --progress           Show a live progress meter on stderr",
 "  -q, --quiet          Print no messages, even on error",
 "  -r, --recursive      Process the contents of all subdirectories",
 "  -R, --rsyncable      Input-determined block locations for rsync",
@@ -4431,6 +4494,15 @@ local int option(char *arg) {
             int j;
 
             arg++;
+            // long-only options with no single-letter equivalent
+            if (strcmp(arg, "progress") == 0) {
+                g.progress = 1;
+                return 1;
+            }
+            if (strcmp(arg, "no-progress") == 0) {
+                g.progress = 0;
+                return 1;
+            }
             for (j = NLOPTS - 1; j >= 0; j--)
                 if (strcmp(arg, longopts[j][0]) == 0) {
                     arg = longopts[j][1];
@@ -4618,10 +4690,37 @@ int main(int argc, char **argv) {
         g.hname = NULL;
         g.hcomm = NULL;
 
-        // save pointer to program name for error messages
-        p = strrchr(argv[0], '/');
-        p = p == NULL ? argv[0] : p + 1;
+        // save pointer to program name for error messages -- scan for both
+        // '/' and '\' so a Windows argv[0] like "C:\path\unpigz.exe" reduces
+        // to its base name, enabling the "unpigz"/"gunzip" decode detection
+        {
+            char *s;
+            p = argv[0];
+            for (s = argv[0]; *s; s++)
+                if (*s == '/' || *s == '\\')
+                    p = s + 1;
+        }
         g.prog = *p ? p : "pigz";
+#ifdef _WIN32
+        // strip a trailing ".exe" (any case) so "unpigz.exe" matches "unpigz"
+        {
+            size_t pl = strlen(g.prog);
+            if (pl > 4) {
+                char *ext = g.prog + pl - 4;
+                if (ext[0] == '.' &&
+                    (ext[1] == 'e' || ext[1] == 'E') &&
+                    (ext[2] == 'x' || ext[2] == 'X') &&
+                    (ext[3] == 'e' || ext[3] == 'E')) {
+                    static char progbuf[260];   // MAX_PATH
+                    size_t m = pl - 4 < sizeof(progbuf) - 1 ?
+                               pl - 4 : sizeof(progbuf) - 1;
+                    memcpy(progbuf, g.prog, m);
+                    progbuf[m] = 0;
+                    g.prog = progbuf;
+                }
+            }
+        }
+#endif
 
         // prepare for interrupts and logging
         signal(SIGINT, cut_short);
