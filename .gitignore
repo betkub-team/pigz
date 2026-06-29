@@ -4,3 +4,5 @@
 /pigzj
 /pigzt
 /pigzn
+# Windows cross-build artifacts (deployed separately to d:\WSL\script)
+*.exe

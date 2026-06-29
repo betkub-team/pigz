@@ -1,8 +1,29 @@
-pigz 2.8 (19 Aug 2022) by Mark Adler
+pigz 2.9 (29 Jun 2026) by Mr. Pong
 
 pigz, which stands for Parallel Implementation of GZip, is a fully functional
 replacement for gzip that exploits multiple processors and multiple cores to
 the hilt when compressing data.
+
+-------------------------------------------------------------------------------
+NOTE: This is an ALTERED version of pigz (fork: betkub-team/pigz), not the
+original distribution by Mark Adler. It is maintained to produce a static
+Windows pigz.exe/unpigz.exe for the WSL VHDX backup scripts. Changes from
+upstream v2.8:
+
+  * Added --progress / --no-progress: a throttled live meter on stderr for
+    both compression and decompression (input-based %, GB/GB, MB/s). stdout
+    stays a pure data stream, so -c pipelines are unaffected.
+  * Windows program-name detection: the executable basename is parsed across
+    both '/' and '\' separators and a trailing ".exe" is stripped, so a binary
+    named unpigz.exe automatically decompresses.
+  * Built static against zlib-ng (zlib-compat) for runtime-dispatched AVX2
+    deflate, using the mingw-w64 14-posix toolchain whose fixed winpthreads
+    avoids the parallel "hang waiting on lock".
+
+To cross-compile the Windows binaries, see the "build-pigz" skill at
+.claude/skills/build-pigz/SKILL.md (full recipe), or docs/build-plan.md.
+The native "make" build below is unchanged.
+-------------------------------------------------------------------------------
 
 pigz was written by Mark Adler and does not include third-party code. I am
 making my contributions to and distributions of this project solely in my
