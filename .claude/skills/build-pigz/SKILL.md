@@ -105,7 +105,13 @@ small + >4 GB round-trip with `--progress`; `unpigz` name auto-decompresses (Pat
   Always verify before promoting, and confirm with the user.
 
 ## Notes
-- The "lock hang" is toolchain-dependent: mingw **14-posix** carries the fixed winpthreads (the cure).
-  Diagnostic on recurrence: ~0% CPU = CV/lock wait; an optional Win32 SRWLOCK yarn backend (Patch C)
-  is belt-and-suspenders, not currently applied.
+- The "lock hang" is toolchain-dependent: mingw **14-posix** carries the fixed winpthreads (cures the
+  ~0% CPU hang). It does NOT cure a second winpthreads bug — mutex ownership mis-tracking under heavy
+  lock churn, which aborts with `already unlocked (...:mutex_unlock)` / `internal threads error`
+  (reproducible compressing a highly-compressible >100 GB input, blocks finishing near-instantly).
+- **Patch C is now APPLIED** (`yarn.c`, v2.9.1): an `#ifdef _WIN32` lock backend using `SRWLOCK` +
+  `CONDITION_VARIABLE` (no owner bookkeeping → `Release` never returns EPERM; `SleepConditionVariableSRW`
+  is race-free). Threads still use pthread. Guardrail kept: broadcast while holding the lock, then
+  release. Verify imports after build: `objdump -p pigz.exe | grep -iE 'SRWLock|ConditionVariable'`.
+  Diagnostic on any recurrence: ~0% CPU = CV/lock wait.
 - Full background and rationale: `docs/build-plan.md`; running status: `docs/HANDOFF.md`.

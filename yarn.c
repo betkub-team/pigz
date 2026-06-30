@@ -36,6 +36,15 @@
 // External libraries and entities referenced.
 #include <stdio.h>      // fprintf(), stderr
 #include <stdlib.h>     // exit(), malloc(), free(), NULL
+#ifdef _WIN32
+// Patch C: native Win32 SRWLOCK + CONDITION_VARIABLE lock backend (see the
+// "-- Lock functions --" section below). Threads still use pthread.
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>  // SRWLOCK, CONDITION_VARIABLE, AcquireSRWLockExclusive(),
+                        // ReleaseSRWLockExclusive(), SleepConditionVariableSRW(),
+                        // WakeAllConditionVariable(), SRWLOCK_INIT,
+                        // CONDITION_VARIABLE_INIT
+#endif
 #include <pthread.h>    // pthread_t, pthread_create(), pthread_join(),
     // pthread_attr_t, pthread_attr_init(), pthread_attr_destroy(),
     // PTHREAD_CREATE_JOINABLE, pthread_attr_setdetachstate(),
@@ -115,6 +124,97 @@ local void *my_malloc(size_t size, char const *file, long line) {
 
 // -- Lock functions --
 
+#define until(a) while(!(a))
+
+#ifdef _WIN32
+
+// Patch C — native Win32 lock backend.
+//
+// winpthreads (even mingw 14-posix) mis-tracks mutex ownership under heavy
+// lock/condition churn: a thread that has just possess()ed a lock can get EPERM
+// ("already unlocked") from pthread_mutex_unlock() inside twist(), because a
+// waiter's pthread_cond_wait() re-acquisition races the signaler's unlock. That
+// aborts pigz with "internal threads error" mid-compress (reproducible on a
+// highly compressible >100 GB input where blocks finish almost instantly). See
+// docs/build-plan.md "Patch C". SRWLOCK keeps no owner bookkeeping (Release
+// never returns EPERM) and SleepConditionVariableSRW / WakeAllConditionVariable
+// are race-free, so this backend removes the failure mode entirely. Thread
+// creation/joining still uses pthread (its winpthreads path is unaffected).
+//
+// Guardrail (per build-plan.md): broadcast while the lock is still held, then
+// release — never signal after unlock — matching the POSIX backend's ordering.
+
+struct lock_s {
+    SRWLOCK srw;
+    CONDITION_VARIABLE cond;
+    long value;
+};
+
+lock *new_lock_(long initial, char const *file, long line) {
+    lock *bolt = my_malloc(sizeof(struct lock_s), file, line);
+    InitializeSRWLock(&(bolt->srw));
+    InitializeConditionVariable(&(bolt->cond));
+    bolt->value = initial;
+    return bolt;
+}
+
+void possess_(lock *bolt, char const *file, long line) {
+    (void)file; (void)line;
+    AcquireSRWLockExclusive(&(bolt->srw));
+}
+
+void release_(lock *bolt, char const *file, long line) {
+    (void)file; (void)line;
+    ReleaseSRWLockExclusive(&(bolt->srw));
+}
+
+void twist_(lock *bolt, enum twist_op op, long val,
+            char const *file, long line) {
+    (void)file; (void)line;
+    if (op == TO)
+        bolt->value = val;
+    else if (op == BY)
+        bolt->value += val;
+    WakeAllConditionVariable(&(bolt->cond));   // signal while still holding ...
+    ReleaseSRWLockExclusive(&(bolt->srw));     // ... then release
+}
+
+void wait_for_(lock *bolt, enum wait_op op, long val,
+               char const *file, long line) {
+    (void)file; (void)line;
+    switch (op) {
+        case TO_BE:
+            until (bolt->value == val)
+                SleepConditionVariableSRW(&(bolt->cond), &(bolt->srw), INFINITE, 0);
+            break;
+        case NOT_TO_BE:
+            until (bolt->value != val)
+                SleepConditionVariableSRW(&(bolt->cond), &(bolt->srw), INFINITE, 0);
+            break;
+        case TO_BE_MORE_THAN:
+            until (bolt->value > val)
+                SleepConditionVariableSRW(&(bolt->cond), &(bolt->srw), INFINITE, 0);
+            break;
+        case TO_BE_LESS_THAN:
+            until (bolt->value < val)
+                SleepConditionVariableSRW(&(bolt->cond), &(bolt->srw), INFINITE, 0);
+    }
+}
+
+long peek_lock(lock *bolt) {
+    return bolt->value;
+}
+
+void free_lock_(lock *bolt, char const *file, long line) {
+    (void)file; (void)line;
+    // SRWLOCK and CONDITION_VARIABLE need no destruction.
+    if (bolt == NULL)
+        return;
+    my_free(bolt);
+}
+
+#else  // POSIX backend (pthread mutex + condition variable)
+
 struct lock_s {
     pthread_mutex_t mutex;
     pthread_cond_t cond;
@@ -158,8 +258,6 @@ void twist_(lock *bolt, enum twist_op op, long val,
     if (ret)
         fail(ret, file, line, "mutex_unlock");
 }
-
-#define until(a) while(!(a))
 
 void wait_for_(lock *bolt, enum wait_op op, long val,
                char const *file, long line) {
@@ -210,6 +308,8 @@ void free_lock_(lock *bolt, char const *file, long line) {
     my_free(bolt);
 }
 
+#endif  // _WIN32
+
 // -- Thread functions (uses the lock functions above) --
 
 struct thread_s {
@@ -221,8 +321,13 @@ struct thread_s {
 // List of threads launched but not joined, count of threads exited but not
 // joined (incremented by ignition() just before exiting).
 local lock threads_lock = {
+#ifdef _WIN32
+    SRWLOCK_INIT,
+    CONDITION_VARIABLE_INIT,
+#else
     PTHREAD_MUTEX_INITIALIZER,
     PTHREAD_COND_INITIALIZER,
+#endif
     0                           // number of threads exited but not joined
 };
 local thread *threads = NULL;       // list of extant threads

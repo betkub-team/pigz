@@ -1,6 +1,6 @@
 /* pigz.c -- parallel implementation of gzip
  * Copyright (C) 2007-2023 Mark Adler
- * Version 2.9  29 Jun 2026  Mr. Pong
+ * Version 2.9.1  30 Jun 2026  Mr. Pong
  */
 
 /*
@@ -211,9 +211,12 @@
    2.9    29 Jun 2026  Add --progress live meter on stderr (compress/decompress/test)
                        Windows: detect program name and strip .exe for unpigz
                        Build static Windows .exe linked against zlib-ng
+   2.9.1  30 Jun 2026  Windows: native SRWLOCK/CONDITION_VARIABLE yarn lock
+                       backend (yarn.c Patch C) — fixes winpthreads "already
+                       unlocked" abort under heavy lock churn on large inputs
  */
 
-#define VERSION "pigz 2.9"
+#define VERSION "pigz 2.9.1"
 
 /* To-do:
     - make source portable for Windows, VMS, etc. (see gzip source code)
